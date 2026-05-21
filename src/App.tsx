@@ -21,11 +21,33 @@ import {
   AlertTriangle,
   ChevronRight,
   Menu,
-  X
+  X,
+  BadgeAlert,
+  LogOut,
+  Send,
+  Loader2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Map, Marker } from 'pigeon-maps';
 import { cn } from './lib/utils';
+import { 
+  auth, 
+  googleProvider, 
+  getOrCreateProfile, 
+  updateProfile as apiUpdateProfile, 
+  getUserReviews as apiGetUserReviews, 
+  addUserReview as apiAddReview,
+  UserProfile, 
+  UserReview 
+} from './lib/firebase';
+import { 
+  signInWithPopup, 
+  signOut, 
+  onAuthStateChanged,
+  signInWithCredential,
+  GoogleAuthProvider,
+  User as FirebaseUser
+} from 'firebase/auth';
 
 // --- Types ---
 
@@ -46,7 +68,15 @@ interface FoodItem {
 
 // --- Components ---
 
-const Navigation = ({ activePage, setActivePage }: { activePage: Page, setActivePage: (p: Page) => void }) => {
+const Navigation = ({ 
+  activePage, 
+  setActivePage,
+  profile
+}: { 
+  activePage: Page, 
+  setActivePage: (p: Page) => void,
+  profile: UserProfile | null
+}) => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   const navItems = [
@@ -81,7 +111,11 @@ const Navigation = ({ activePage, setActivePage }: { activePage: Page, setActive
                     : "text-stone-500 hover:text-stone-800 hover:bg-stone-50"
                 )}
               >
-                <item.icon className="w-4 h-4" />
+                {item.id === 'profile' && profile ? (
+                  <img src={profile.photoURL} alt="profile" className="w-5 h-5 rounded-full object-cover border border-emerald-500" />
+                ) : (
+                  <item.icon className="w-4 h-4" />
+                )}
                 {item.label}
               </button>
             ))}
@@ -98,7 +132,11 @@ const Navigation = ({ activePage, setActivePage }: { activePage: Page, setActive
                   activePage === item.id ? "text-emerald-600" : "text-stone-400"
                 )}
               >
-                <item.icon className={cn("w-6 h-6", activePage === item.id && "animate-pulse")} />
+                {item.id === 'profile' && profile ? (
+                  <img src={profile.photoURL} alt="profile" className={cn("w-6 h-6 rounded-full object-cover border", activePage === item.id ? "border-emerald-500" : "border-stone-300")} />
+                ) : (
+                  <item.icon className={cn("w-6 h-6", activePage === item.id && "animate-pulse")} />
+                )}
                 <span className="text-[10px] font-medium">{item.label}</span>
               </button>
             ))}
@@ -294,13 +332,8 @@ const MapView = () => {
       <div className="flex-grow h-[50vh] md:h-full relative shrink-0">
         <Map height={undefined} center={center} zoom={13} onBoundsChanged={({ center }) => setCenter(center)}>
           {mockItems.map((item) => (
-            // @ts-ignore - pigeon-maps MarkerProps doesn't explicitly include 'key' but React demands it for mapping
-            <Marker 
-              key={item.id} 
-              width={50} 
-              anchor={item.location} 
-              onClick={() => setSelectedItem(item)}
-            >
+            // @ts-ignore
+            <Marker key={item.id} width={50} anchor={item.location} onClick={() => setSelectedItem(item)}>
               <div className={cn(
                 "w-10 h-10 rounded-full border-4 border-white shadow-xl flex items-center justify-center transform hover:scale-110 transition-transform cursor-pointer",
                 item.freshness === 'fresh' ? "bg-emerald-500" :
@@ -734,92 +767,384 @@ const NGODashboard = () => {
   );
 };
 
-const Profile = () => {
+const Profile = ({
+  user,
+  profile,
+  reviews,
+  isLoading,
+  onSignIn,
+  onSignOut,
+  onUpdate,
+  onAddReview
+}: {
+  user: any;
+  profile: UserProfile | null;
+  reviews: UserReview[];
+  isLoading: boolean;
+  onSignIn: (isDemo?: boolean) => void;
+  onSignOut: () => void;
+  onUpdate: (data: Partial<UserProfile>) => Promise<void>;
+  onAddReview: (text: string, rating: number, authorName: string) => Promise<void>;
+}) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const [editName, setEditName] = useState('');
+  const [editLocation, setEditLocation] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+
+  // Review state
+  const [reviewText, setReviewText] = useState('');
+  const [reviewRating, setReviewRating] = useState(5);
+  const [reviewAuthor, setReviewAuthor] = useState('');
+  const [isSubmittingReview, setIsSubmittingReview] = useState(false);
+  const [showReviewForm, setShowReviewForm] = useState(false);
+
+  useEffect(() => {
+    if (profile) {
+      setEditName(profile.name);
+      setEditLocation(profile.location);
+    }
+  }, [profile, isEditing]);
+
+  const handleSaveProfile = async () => {
+    if (!editName.trim()) return;
+    setIsSaving(true);
+    try {
+      await onUpdate({ name: editName, location: editLocation });
+      setIsEditing(false);
+    } catch (err) {
+      alert("Error updating profile: " + err);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleSubmitReview = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!reviewText.trim() || !reviewAuthor.trim()) return;
+    setIsSubmittingReview(true);
+    try {
+      await onAddReview(reviewText, reviewRating, reviewAuthor);
+      setReviewText('');
+      setReviewAuthor('');
+      setReviewRating(5);
+      setShowReviewForm(false);
+    } catch (err) {
+      alert("Error adding review: " + err);
+    } finally {
+      setIsSubmittingReview(false);
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="pt-24 md:pt-32 pb-24 px-4 bg-stone-50 min-h-screen flex flex-col items-center justify-center">
+        <Loader2 className="w-12 h-12 text-emerald-600 animate-spin" />
+        <span className="text-stone-500 font-bold mt-4">Connecting to Leftover Connect Network...</span>
+      </div>
+    );
+  }
+
+  if (!user || !profile) {
+    return (
+      <div className="pt-24 md:pt-32 pb-24 px-4 bg-stone-50 min-h-screen">
+        <div className="max-w-2xl mx-auto text-center space-y-8 bg-white p-8 md:p-16 rounded-[3rem] shadow-2xl border border-stone-100 relative overflow-hidden">
+          <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-100/40 blur-3xl rounded-full" />
+          <div className="absolute bottom-0 left-0 w-32 h-32 bg-orange-100/40 blur-3xl rounded-full" />
+          
+          <div className="w-20 h-20 bg-emerald-50 rounded-[2rem] flex items-center justify-center mx-auto shadow-md">
+            <ShieldCheck className="w-10 h-10 text-emerald-600" />
+          </div>
+
+          <div className="space-y-3">
+            <h1 className="text-3xl md:text-4xl font-extrabold text-stone-900 leading-tight">
+              Unlock Your <span className="text-emerald-600 font-serif italic">Verified Impact</span> Profile
+            </h1>
+            <p className="text-stone-500 max-w-md mx-auto text-sm md:text-base leading-relaxed">
+              Create a trusted local donor card. Earn reputation scores, collect community badges, level-up your Karma points, and receive genuine NGO pick-up reviews.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3 max-w-md mx-auto pt-4 text-left">
+            <div className="p-4 bg-emerald-50 rounded-2xl">
+              <StarIcon className="w-5 h-5 text-emerald-600 fill-emerald-600 mb-2" />
+              <div className="text-xs font-black text-stone-800">Trust Scores</div>
+              <div className="text-[10px] text-stone-400 mt-1">NGO verified ratings</div>
+            </div>
+            <div className="p-4 bg-orange-50 rounded-2xl">
+              <Leaf className="w-5 h-5 text-orange-500 mb-2" />
+              <div className="text-xs font-black text-stone-800">Karma Points</div>
+              <div className="text-[10px] text-stone-400 mt-1">Level up with sharing</div>
+            </div>
+            <div className="p-4 bg-stone-50 rounded-2xl">
+              <ShieldCheck className="w-5 h-5 text-stone-600 mb-2" />
+              <div className="text-xs font-black text-stone-800">Local Badges</div>
+              <div className="text-[10px] text-stone-400 mt-1">Celebrate your kindness</div>
+            </div>
+          </div>
+
+          <div className="flex flex-col sm:flex-row justify-center items-center gap-4 pt-6 max-w-md mx-auto">
+            <button 
+              onClick={() => onSignIn(false)}
+              className="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-4 px-6 rounded-2xl font-bold font-sans transition-all active:scale-95 flex items-center justify-center gap-3 shadow-lg shadow-emerald-200"
+            >
+              Sign In with Google
+            </button>
+            <button 
+              onClick={() => onSignIn(true)}
+              className="w-full bg-stone-900 hover:bg-stone-800 text-white py-4 px-6 rounded-2xl font-bold font-sans transition-all active:scale-95 flex items-center justify-center gap-2"
+            >
+              🚀 Quick Sandbox Profile (Demo)
+            </button>
+          </div>
+          <p className="text-[10px] text-stone-400 font-medium">Use the Quick Sandbox mode to simulate complete database persistence if Google Popups are blocked in the iframe container.</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="pt-24 md:pt-32 pb-24 px-4 bg-stone-50 min-h-screen">
       <div className="max-w-4xl mx-auto">
+        {/* Profile Card Header */}
         <header className="relative mb-12">
           <div className="h-60 bg-gradient-to-br from-emerald-600 to-teal-800 rounded-[3rem] shadow-2xl relative overflow-hidden">
             <div className="absolute inset-0 opacity-20" style={{ backgroundImage: 'radial-gradient(circle at 2px 2px, white 1px, transparent 0)', backgroundSize: '40px 40px' }} />
           </div>
-          <div className="mx-8 -mt-20 relative flex flex-col md:flex-row items-end gap-6">
-            <div className="w-40 h-40 rounded-[2.5rem] bg-white p-2 shadow-2xl border-4 border-white overflow-hidden">
-              <img src="https://api.dicebear.com/7.x/avataaars/svg?seed=Chinmay" className="w-full h-full bg-orange-50 rounded-[2rem] object-cover" />
+          <div className="mx-8 -mt-20 relative flex flex-col md:flex-row items-end justify-between gap-6">
+            <div className="flex flex-col md:flex-row items-end gap-6">
+              <div className="w-40 h-40 rounded-[2.5rem] bg-white p-2 shadow-2xl border-4 border-white overflow-hidden relative group">
+                <img src={profile.photoURL} className="w-full h-full bg-orange-50 rounded-[2rem] object-cover" alt="avatar" />
+              </div>
+              <div className="pb-4 space-y-1">
+                <h1 className="text-4xl font-black text-stone-900 flex flex-wrap items-center gap-3">
+                  {profile.name}
+                  <div className="px-3 py-1 bg-emerald-50 text-emerald-600 rounded-full text-xs font-black uppercase tracking-tighter">Verified Donor</div>
+                </h1>
+                <p className="text-stone-500 font-medium flex items-center gap-2">
+                  <MapPin className="w-4 h-4 text-emerald-600" /> {profile.location}
+                </p>
+                <div className="text-xs text-stone-400 font-bold">Email: {profile.email}</div>
+              </div>
             </div>
-            <div className="pb-4 space-y-1">
-              <h1 className="text-4xl font-black text-stone-900 flex items-center gap-3">
-                Chinmay Joshi
-                <div className="px-3 py-1 bg-emerald-50 text-emerald-600 rounded-full text-xs font-black uppercase tracking-tighter">Verified Donor</div>
-              </h1>
-              <p className="text-stone-500 font-medium">Fighting food waste since Feb 2024 • Bangalore, IN</p>
-            </div>
+            
+            <button 
+              onClick={onSignOut}
+              className="mb-4 px-4 py-2 bg-stone-150 hover:bg-red-50 hover:text-red-600 text-stone-500 border border-stone-200 rounded-xl text-xs font-bold font-mono uppercase tracking-wider flex items-center gap-2 transition-all"
+            >
+              <LogOut className="w-4 h-4" /> Sign Out
+            </button>
           </div>
         </header>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-           <div className="md:col-span-2 space-y-8">
-             <div className="bg-white p-10 rounded-[2.5rem] border border-stone-100 shadow-sm space-y-8">
-                <div className="flex justify-between items-center">
-                  <h3 className="text-2xl font-bold text-stone-900">Trust & Reputation</h3>
-                  <div className="flex items-center gap-1">
-                     {[1,2,3,4,5].map(i => <StarIcon key={i} className="w-5 h-5 text-orange-500 fill-orange-500" />)}
-                     <span className="ml-2 font-black text-stone-900">4.9</span>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="p-6 bg-stone-50 rounded-3xl border border-stone-100 space-y-2">
-                    <div className="text-4xl font-black text-emerald-600">82</div>
-                    <div className="text-xs font-bold text-stone-500 uppercase tracking-widest">Meals Shared</div>
-                  </div>
-                  <div className="p-6 bg-stone-50 rounded-3xl border border-stone-100 space-y-2">
-                    <div className="text-4xl font-black text-orange-500">14</div>
-                    <div className="text-xs font-bold text-stone-500 uppercase tracking-widest">Karma Points</div>
-                  </div>
-                </div>
-                <div className="space-y-4">
-                   <h4 className="font-bold text-stone-900">Recent Badges</h4>
-                   <div className="flex gap-4">
-                      {[
-                        { icon: UtensilsCrossed, label: 'Early Bird', color: 'bg-emerald-100 text-emerald-600' },
-                        { icon: ShieldCheck, label: 'Safe Server', color: 'bg-blue-100 text-blue-600' },
-                        { icon: Heart, label: 'Kind Soul', color: 'bg-red-100 text-red-600' },
-                      ].map((badge, i) => (
-                        <div key={i} className="flex flex-col items-center gap-2">
-                           <div className={cn("w-14 h-14 rounded-2xl flex items-center justify-center transition-transform hover:rotate-12", badge.color)}>
-                              <badge.icon className="w-6 h-6" />
-                           </div>
-                           <span className="text-[10px] font-black text-stone-400 uppercase tracking-widest">{badge.label}</span>
-                        </div>
-                      ))}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+           <div className="lg:col-span-2 space-y-8">
+             {/* Edit mode or Reputation Dashboard */}
+             {isEditing ? (
+               <motion.div 
+                 initial={{ opacity: 0, scale: 0.98 }}
+                 animate={{ opacity: 1, scale: 1 }}
+                 className="bg-white p-8 rounded-[2.5rem] border border-stone-100 shadow-xl space-y-6"
+               >
+                 <h2 className="text-2xl font-bold text-stone-900">Update Profile Fields</h2>
+                 <div className="space-y-4">
+                   <div className="space-y-1">
+                     <label className="text-xs font-black text-stone-400 uppercase tracking-widest">Full Name</label>
+                     <input 
+                       type="text" 
+                       value={editName}
+                       onChange={(e) => setEditName(e.target.value)}
+                       className="w-full p-4 bg-stone-50 rounded-2xl border-2 border-stone-100 outline-none focus:border-emerald-500 transition-all font-sans text-stone-800"
+                     />
                    </div>
+                   <div className="space-y-1">
+                     <label className="text-xs font-black text-stone-400 uppercase tracking-widest">Location / Neighborhood</label>
+                     <input 
+                       type="text" 
+                       value={editLocation}
+                       onChange={(e) => setEditLocation(e.target.value)}
+                       className="w-full p-4 bg-stone-50 rounded-2xl border-2 border-stone-100 outline-none focus:border-emerald-500 transition-all font-sans text-stone-800"
+                     />
+                   </div>
+                 </div>
+                 <div className="flex gap-4 pt-2">
+                   <button 
+                     disabled={isSaving}
+                     onClick={() => setIsEditing(false)}
+                     className="flex-grow py-4 bg-stone-100 hover:bg-stone-200 text-stone-800 rounded-xl font-bold transition-all"
+                   >
+                     Cancel
+                   </button>
+                   <button 
+                     disabled={isSaving}
+                     onClick={handleSaveProfile}
+                     className="flex-grow py-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold transition-all shadow-md shadow-emerald-50"
+                   >
+                     {isSaving ? "Saving..." : "Save Updates"}
+                   </button>
+                 </div>
+               </motion.div>
+             ) : (
+               <div className="bg-white p-8 md:p-10 rounded-[2.5rem] border border-stone-100 shadow-sm space-y-8">
+                  <div className="flex justify-between items-center">
+                    <h3 className="text-2xl font-bold text-stone-900">Trust & Reputation</h3>
+                    <div className="flex items-center gap-1">
+                       {[1,2,3,4,5].map(i => (
+                         <StarIcon 
+                           key={i} 
+                           className={cn(
+                             "w-5 h-5",
+                             i <= Math.round(profile.rating) ? "text-orange-500 fill-orange-500" : "text-stone-200"
+                           )} 
+                         />
+                       ))}
+                       <span className="ml-2 font-black text-stone-900">{profile.rating}</span>
+                    </div>
+                  </div>
+                  
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="p-6 bg-stone-50 rounded-3xl border border-stone-100 scale-100 hover:scale-[1.02] transition-transform">
+                      <div className="text-4xl font-black text-emerald-600">{profile.mealsShared}</div>
+                      <div className="text-xs font-bold text-stone-500 uppercase tracking-widest mt-1">Meals Shared</div>
+                    </div>
+                    <div className="p-6 bg-stone-50 rounded-3xl border border-stone-100 scale-100 hover:scale-[1.02] transition-transform">
+                      <div className="text-4xl font-black text-orange-500">{profile.karmaPoints}</div>
+                      <div className="text-xs font-bold text-stone-500 uppercase tracking-widest mt-1">Karma Points</div>
+                    </div>
+                  </div>
+                  
+                  <div className="space-y-4">
+                     <h4 className="font-bold text-stone-900">Recent Badges</h4>
+                     <div className="flex flex-wrap gap-4">
+                        {[
+                          { icon: UtensilsCrossed, label: 'Early Bird', color: 'bg-emerald-50 text-emerald-600' },
+                          { icon: ShieldCheck, label: 'Safe Server', color: 'bg-blue-50 text-blue-600' },
+                          { icon: Heart, label: 'Kind Soul', color: 'bg-red-50 text-red-600' },
+                        ].map((badge, i) => (
+                          <div key={i} className="flex flex-col items-center gap-2">
+                             <div className={cn("w-14 h-14 rounded-2xl flex items-center justify-center transition-all hover:scale-105 shadow-sm", badge.color)}>
+                                <badge.icon className="w-6 h-6" />
+                             </div>
+                             <span className="text-[10px] font-black text-stone-400 uppercase tracking-widest">{badge.label}</span>
+                          </div>
+                        ))}
+                     </div>
+                  </div>
+
+                  <div className="pt-4 border-t border-stone-100 flex gap-4">
+                     <button 
+                       onClick={() => setIsEditing(true)}
+                       className="w-full py-4 bg-stone-100 hover:bg-stone-200 text-stone-800 text-sm font-bold rounded-2xl transition-all"
+                     >
+                       Edit Profiles Settings
+                     </button>
+                  </div>
+               </div>
+             )}
+
+             {/* Dynamic simulator widget for community feedback */}
+             <div className="bg-gradient-to-br from-stone-900 to-stone-800 p-8 rounded-[2.5rem] shadow-xl text-white space-y-6">
+                <div className="flex justify-between items-center">
+                  <div>
+                    <h3 className="text-lg font-black tracking-wide">Test Feedback Simulator</h3>
+                    <p className="text-xs text-stone-400">Write mock partner or NGO reviews to see real average reputation scores update in Firestore.</p>
+                  </div>
+                  <button 
+                    onClick={() => setShowReviewForm(!showReviewForm)}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-stone-100 text-xs font-bold rounded-xl transition-all"
+                  >
+                    {showReviewForm ? "Hide" : "Add Live Review"}
+                  </button>
                 </div>
+
+                {showReviewForm && (
+                  <form onSubmit={handleSubmitReview} className="space-y-4 mt-4 bg-stone-800 p-6 rounded-2xl border border-stone-700">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="space-y-1">
+                        <label className="text-[10px] uppercase font-black text-stone-400">Author Name</label>
+                        <input 
+                          type="text"
+                          required
+                          placeholder="e.g. NGO: Hope India or Neighbor Ravi" 
+                          value={reviewAuthor}
+                          onChange={(e) => setReviewAuthor(e.target.value)}
+                          className="w-full p-3 bg-stone-900 border border-stone-700 rounded-xl outline-none text-sm text-stone-100 focus:border-emerald-500"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] uppercase font-black text-stone-400">Review Star Score</label>
+                        <select 
+                          value={reviewRating}
+                          onChange={(e) => setReviewRating(Number(e.target.value))}
+                          className="w-full p-3 bg-stone-900 border border-stone-700 rounded-xl outline-none text-sm text-stone-100 appearance-none cursor-pointer focus:border-emerald-500"
+                        >
+                          <option value="5">5 Stars Excellent</option>
+                          <option value="4">4 Stars Good</option>
+                          <option value="3">3 Stars Average</option>
+                          <option value="2">2 Stars Poor</option>
+                          <option value="1">1 Star Awful</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-[10px] uppercase font-black text-stone-400">Review Feedback</label>
+                      <textarea 
+                        required
+                        rows={2}
+                        placeholder="Type what they would say about your leftover item..."
+                        value={reviewText}
+                        onChange={(e) => setReviewText(e.target.value)}
+                        className="w-full p-3 bg-stone-900 border border-stone-700 rounded-xl outline-none text-sm text-stone-100 focus:border-emerald-500"
+                      />
+                    </div>
+
+                    <button 
+                      type="submit"
+                      disabled={isSubmittingReview}
+                      className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2 transition-all shadow-lg shadow-emerald-900/30"
+                    >
+                      {isSubmittingReview ? "Submitting..." : <>Push live to Firestore <Send className="w-3.5 h-3.5" /></>}
+                    </button>
+                  </form>
+                )}
              </div>
            </div>
 
            <div className="space-y-8">
+              {/* Dynamic Reviews fetched live from Firestore subcollection */}
               <div className="bg-white p-8 rounded-[2.5rem] border border-stone-100 shadow-sm">
-                <h3 className="text-xl font-bold text-stone-900 mb-6 font-serif">Community Reviews</h3>
-                <div className="space-y-6">
-                  {[
-                    { name: 'NGO: Hope India', text: 'Quality was exceptional. Perfect for slum distribution.', rating: 5 },
-                    { name: 'Rahul K.', text: 'Very polite and food was packed beautifully.', rating: 5 }
-                  ].map((rev, i) => (
-                    <div key={i} className="space-y-2">
-                       <div className="flex justify-between items-center">
-                          <span className="text-xs font-black text-stone-800">{rev.name}</span>
-                          <div className="flex gap-0.5">
-                             {[1,2,3].map(j => <StarIcon key={j} className="w-2.5 h-2.5 text-orange-500 fill-orange-500" />)}
-                          </div>
-                       </div>
-                       <p className="text-xs text-stone-500 leading-relaxed italic">"{rev.text}"</p>
+                <h3 className="text-xl font-bold text-stone-900 mb-6 font-serif flex items-center justify-between">
+                  Community Reviews
+                  <span className="text-xs bg-stone-100 text-stone-500 px-2 py-1 rounded-full font-sans font-black">{reviews.length} total</span>
+                </h3>
+                <div className="space-y-6 max-h-[420px] overflow-y-auto pr-2 scrollbar-hide">
+                  {reviews.length === 0 ? (
+                    <div className="py-12 text-center text-stone-400 text-xs">
+                      No feedback yet. Add a review using the simulator!
                     </div>
-                  ))}
+                  ) : (
+                    reviews.map((rev) => (
+                      <div key={rev.id} className="space-y-2 border-b border-stone-50 pb-4 last:border-0 last:pb-0">
+                         <div className="flex justify-between items-center">
+                            <span className="text-xs font-black text-stone-800">{rev.authorName}</span>
+                            <div className="flex gap-0.5">
+                               {Array.from({ length: 5 }).map((_, idx) => (
+                                 <StarIcon 
+                                   key={idx} 
+                                   className={cn(
+                                     "w-2.5 h-2.5",
+                                     idx < rev.rating ? "text-orange-500 fill-orange-500" : "text-stone-100"
+                                   )} 
+                                 />
+                               ))}
+                            </div>
+                         </div>
+                         <p className="text-xs text-stone-500 leading-relaxed italic">"{rev.text}"</p>
+                      </div>
+                    ))
+                  )}
                 </div>
               </div>
-
-              <button className="w-full py-5 bg-stone-900 text-white rounded-2xl font-bold shadow-xl shadow-stone-200">
-                Edit Profile
-              </button>
            </div>
         </div>
       </div>
@@ -831,10 +1156,130 @@ const Profile = () => {
 
 export default function App() {
   const [activePage, setActivePage] = useState<Page>('landing');
+  const [currentUser, setCurrentUser] = useState<FirebaseUser | null>(null);
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [userReviews, setUserReviews] = useState<UserReview[]>([]);
+  const [isLoadingProfile, setIsLoadingProfile] = useState(false);
+
+  useEffect(() => {
+    // Listen to authentication state shifts
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      setCurrentUser(user);
+      if (user) {
+        setIsLoadingProfile(true);
+        try {
+          // Fetch or initialize the user's Profile card
+          const prof = await getOrCreateProfile(user);
+          setUserProfile(prof);
+
+          // Retrieve verified NGO/Neighbor reviews from Firestore collection
+          const revs = await apiGetUserReviews(user.uid);
+          setUserReviews(revs);
+        } catch (err) {
+          console.error("Could not fetch user profile details", err);
+        } finally {
+          setIsLoadingProfile(false);
+        }
+      } else {
+        setUserProfile(null);
+        setUserReviews([]);
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  const handleSignIn = async (isDemo = false) => {
+    setIsLoadingProfile(true);
+    try {
+      if (isDemo) {
+        // Mock a credential or sign in anonymously/custom for local preview completeness
+        // We create a demo Firebase session or user payload:
+        // Since we are inside the Firebase emulator/production we can create a permanent user Profile in firestore as user /users/demo_user_123
+        const demoAuthUser = {
+          uid: 'demo_user_123',
+          displayName: 'Chinmay Joshi (Demo)',
+          email: 'chinmay.joshi@demo-connect.org',
+          photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Chinmay'
+        };
+        
+        // Setup state simulation as if logged in:
+        setCurrentUser(demoAuthUser as any);
+        const prof = await getOrCreateProfile(demoAuthUser as any);
+        setUserProfile(prof);
+        const revs = await apiGetUserReviews(demoAuthUser.uid);
+        setUserReviews(revs);
+      } else {
+        await signInWithPopup(auth, googleProvider);
+      }
+    } catch (err: any) {
+      console.error(err);
+      alert("Authentication error: " + err.message);
+    } finally {
+      setIsLoadingProfile(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    setIsLoadingProfile(true);
+    try {
+      if (currentUser?.uid === 'demo_user_123') {
+        setCurrentUser(null);
+        setUserProfile(null);
+        setUserReviews([]);
+      } else {
+        await signOut(auth);
+      }
+    } catch (err: any) {
+      alert("Could not sign out: " + err.message);
+    } finally {
+      setIsLoadingProfile(false);
+    }
+  };
+
+  const handleUpdateProfile = async (data: Partial<UserProfile>) => {
+    if (!currentUser) return;
+    try {
+      await apiUpdateProfile(currentUser.uid, data);
+      setUserProfile(prev => prev ? { ...prev, ...data } : null);
+    } catch (err) {
+      console.error("Failed updating profile", err);
+      throw err;
+    }
+  };
+
+  const handleAddReview = async (text: string, rating: number, authorName: string) => {
+    if (!currentUser) return;
+    try {
+      const newRev = await apiAddReview(currentUser.uid, { text, rating, authorName });
+      setUserReviews(prev => [newRev, ...prev]);
+
+      // Calculate new ratings
+      const currentRating = userProfile?.rating || 5.0;
+      const count = userReviews.length + 1;
+      const newAvgRating = parseFloat(((currentRating * (count - 1) + rating) / count).toFixed(1));
+
+      // Append 5 extra karma points for new verified activity!
+      const updatedData = {
+        rating: newAvgRating,
+        karmaPoints: (userProfile?.karmaPoints || 10) + 15
+      };
+
+      await apiUpdateProfile(currentUser.uid, updatedData);
+      setUserProfile(prev => prev ? {
+        ...prev,
+        rating: updatedData.rating,
+        karmaPoints: updatedData.karmaPoints
+      } : null);
+    } catch (err) {
+      console.error("Failed submitting feedback review", err);
+      throw err;
+    }
+  };
 
   return (
     <div className="min-h-screen bg-white font-sans text-stone-900">
-      <Navigation activePage={activePage} setActivePage={setActivePage} />
+      <Navigation activePage={activePage} setActivePage={setActivePage} profile={userProfile} />
       
       <main className="transition-all duration-500">
         <AnimatePresence mode="wait">
@@ -842,7 +1287,20 @@ export default function App() {
           {activePage === 'map' && <motion.div key="map" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}><MapView /></motion.div>}
           {activePage === 'post' && <motion.div key="post" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}><PostFoodForm /></motion.div>}
           {activePage === 'ngo' && <motion.div key="ngo" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}><NGODashboard /></motion.div>}
-          {activePage === 'profile' && <motion.div key="profile" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}><Profile /></motion.div>}
+          {activePage === 'profile' && (
+            <motion.div key="profile" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+              <Profile 
+                user={currentUser} 
+                profile={userProfile} 
+                reviews={userReviews}
+                isLoading={isLoadingProfile}
+                onSignIn={handleSignIn}
+                onSignOut={handleSignOut}
+                onUpdate={handleUpdateProfile}
+                onAddReview={handleAddReview}
+              />
+            </motion.div>
+          )}
         </AnimatePresence>
       </main>
 
